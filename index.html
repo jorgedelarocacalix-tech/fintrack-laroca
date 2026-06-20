@@ -153,6 +153,11 @@ body{font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;background:#E8EA
 .btn-mini{background:none;border:1.5px solid #3B6D11;color:#3B6D11;border-radius:5px;padding:3px 8px;font-size:10px;font-weight:600;cursor:pointer;margin-top:4px}
 .btn-mini:hover{background:#3B6D11;color:#fff}
 .btn-mini.mora-btn{border-color:#A32D2D;color:#A32D2D}
+.btn-mini.pdf{border-color:#185FA5;color:#185FA5}
+.btn-mini.pdf:hover{background:#185FA5;color:#fff}
+.pdf-link{display:inline-flex;align-items:center;gap:3px;font-size:10px;font-weight:700;color:#185FA5;text-decoration:none;background:#E6F1FB;padding:3px 8px;border-radius:5px;margin-top:4px}
+.pdf-link:hover{background:#185FA5;color:#fff}
+.pdf-uploading{font-size:10px;color:#854F0B;margin-top:4px}
 
 .hidden{display:none!important}
 </style>
@@ -221,6 +226,9 @@ body{font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;background:#E8EA
     <div class="empty"><div class="spinner"></div>Cargando...</div>
   </div>
 </div>
+
+<!-- INPUT OCULTO PARA PDF -->
+<input type="file" id="pdf-input" accept="application/pdf" class="hidden" onchange="onPdfSeleccionado(this)">
 
 <!-- MODAL IA -->
 <div class="ia-modal hidden" id="ia-modal" onclick="cerrarIA(event)">
@@ -484,15 +492,19 @@ function cardTarjeta(r, forzarTitular) {
   const sub = r.fecha_pago ? 'Pago: ' + fmtFecha(r.fecha_pago) : 'Sin fecha de pago';
   const usdWarn = r.moneda === 'USD' ? '<div class="pusd">⚠ monto en USD — revisar</div>' : '';
   const nota = r.nota ? `<div class="pnota">${esc(r.nota)}</div>` : '';
-  const boton = r.estado !== 'pagado'
-    ? `<br><button class="btn-mini" onclick="marcarPagadoTarjeta('${r.id}',event)">✓ Pagado</button>`
+  const botonPagado = r.estado !== 'pagado'
+    ? `<button class="btn-mini" onclick="marcarPagadoTarjeta('${r.id}',event)">✓ Pagado</button>`
     : '';
+  const botonPdf = r.pdf_url
+    ? `<a class="pdf-link" href="${r.pdf_url}" target="_blank" onclick="event.stopPropagation()">📄 Ver estado</a>`
+    : `<button class="btn-mini pdf" id="pdf-btn-${r.id}" onclick="pedirPdf('${r.id}',event)">📄 Subir estado</button>`;
+  const acciones = `<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">${botonPagado}${botonPdf}</div>`;
 
   return `<div class="pcard ${urg} ${titular === 'isis' ? 'isis' : ''}" onclick="">
     <div class="picon">${inicial}</div>
     <div class="pinfo">
       <div class="pnombre">${esc(nombre)} <span class="titular-badge tb-${titular}">${titular === 'isis' ? 'Isis' : 'Jorge'}</span></div>
-      <div class="psub">${sub}</div>${nota}${usdWarn}${boton}
+      <div class="psub">${sub}</div>${nota}${usdWarn}${acciones}
     </div>
     <div class="pder">
       <div class="pmonto">${monto}</div>
@@ -994,6 +1006,67 @@ function fmtFecha(iso) {
 function capitalizar(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ''; }
 function esc(s) {
   return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ═══════════════════════════════════════════════════
+// SUBIR ESTADO DE CUENTA (PDF)
+// ═══════════════════════════════════════════════════
+let _pdfRegistroId = null;
+
+function pedirPdf(registroId, e) {
+  if (e) e.stopPropagation();
+  _pdfRegistroId = registroId;
+  document.getElementById('pdf-input').value = '';
+  document.getElementById('pdf-input').click();
+}
+
+async function onPdfSeleccionado(input) {
+  const file = input.files[0];
+  if (!file || !_pdfRegistroId) return;
+
+  // Buscar el registro para armar la ruta
+  const reg = S.registros.find(r => r.id === _pdfRegistroId);
+  const tarjetaId = reg?.tarjeta_id || 'sin-tarjeta';
+  const mes = (reg?.mes || mesActual()).replace(/\s/g, '-');
+  const nombreArchivo = `${tarjetaId}_${mes}_${Date.now()}.pdf`;
+  const ruta = `${tarjetaId}/${mes}/${nombreArchivo}`;
+
+  // Feedback visual
+  const btn = document.getElementById('pdf-btn-' + _pdfRegistroId);
+  if (btn) { btn.textContent = '⏳ Subiendo...'; btn.disabled = true; }
+
+  try {
+    // Subir a Supabase Storage
+    const upRes = await fetch(`${SB_URL}/storage/v1/object/estados-cuenta/${ruta}`, {
+      method: 'POST',
+      headers: {
+        apikey: SB_KEY,
+        Authorization: 'Bearer ' + SB_KEY,
+        'Content-Type': 'application/pdf',
+        'x-upsert': 'true',
+      },
+      body: file,
+    });
+
+    if (!upRes.ok) {
+      const err = await upRes.json();
+      throw new Error(err.message || 'Error subiendo archivo');
+    }
+
+    // URL pública
+    const pdfUrl = `${SB_URL}/storage/v1/object/public/estados-cuenta/${ruta}`;
+
+    // Guardar URL en el registro
+    await sbPatch('ft_registros_mes', _pdfRegistroId, { pdf_url: pdfUrl });
+
+    await cargarTodo();
+    render();
+  } catch (err) {
+    alert('Error al subir el PDF: ' + err.message);
+    if (btn) { btn.textContent = '📄 Subir estado'; btn.disabled = false; }
+  }
+
+  _pdfRegistroId = null;
 }
 </script>
 </body>
