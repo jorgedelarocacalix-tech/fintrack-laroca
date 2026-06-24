@@ -907,17 +907,18 @@ function renderSubirEstado() {
     </div>
 
     <div class="frow">
-      <label>PDF del banco (opcional — se guarda como referencia)</label>
+      <label>PDF del banco — la IA extrae todos los datos automáticamente</label>
       <div id="ec-dropzone" onclick="document.getElementById('ec-file').click()"
-        style="border:2px dashed #C5D8F0;border-radius:10px;padding:18px;text-align:center;cursor:pointer;background:#F4F8FF"
-        ondragover="event.preventDefault();this.style.borderColor='#185FA5'"
-        ondragleave="this.style.borderColor='#C5D8F0'"
+        style="border:2px dashed #C5D8F0;border-radius:10px;padding:20px;text-align:center;cursor:pointer;background:#F4F8FF;transition:.2s"
+        ondragover="event.preventDefault();this.style.borderColor='#185FA5';this.style.background='#EEF5FF'"
+        ondragleave="this.style.borderColor='#C5D8F0';this.style.background='#F4F8FF'"
         ondrop="ecDrop(event)">
-        <div style="font-size:24px;margin-bottom:4px">📄</div>
-        <div style="font-size:12px;color:#555;font-weight:600">Toca para adjuntar el PDF</div>
-        <div id="ec-filename" style="font-size:11px;color:#185FA5;margin-top:4px;font-weight:700"></div>
+        <div style="font-size:28px;margin-bottom:6px">📄</div>
+        <div style="font-size:13px;color:#185FA5;font-weight:700">Toca para subir el PDF</div>
+        <div style="font-size:11px;color:#888;margin-top:3px">La IA lee las fechas y montos automáticamente</div>
+        <div id="ec-filename" style="font-size:11px;color:#185FA5;margin-top:6px;font-weight:700"></div>
       </div>
-      <input type="file" id="ec-file" accept=".pdf,.xlsx,.xls,.csv" class="hidden" onchange="ecArchivoSeleccionado(this)">
+      <input type="file" id="ec-file" accept=".pdf" class="hidden" onchange="ecArchivoSeleccionado(this)">
     </div>
   </div>
 
@@ -966,6 +967,8 @@ function ecSetArchivo(file) {
   _ecArchivo = file;
   const fn = document.getElementById('ec-filename');
   if (fn) fn.textContent = '✓ ' + file.name;
+  const tid = document.getElementById('ec-tarjeta')?.value;
+  if (tid && file.name.toLowerCase().endsWith('.pdf')) ecAnalizar();
 }
 
 function ecMostrarFormulario() {
@@ -977,99 +980,78 @@ function ecMostrarFormulario() {
   if (info) info.innerHTML = `${tarjeta?.banco || ''} ${tarjeta?.cuenta || ''} <span class="titular-badge tb-${tarjeta?.titular||'jorge'}">${tarjeta?.titular==='isis'?'Isis':'Jorge'}</span> — ${capitalizar(mesActual())}`;
   if (res) res.classList.remove('hidden');
   _ecDatosExtraidos = { tarjeta_id: tarjetaId };
+  // Si ya hay un PDF listo, analizar automáticamente
+  if (_ecArchivo && _ecArchivo.name.toLowerCase().endsWith('.pdf')) ecAnalizar();
 }
 
 async function ecAnalizar() {
   const tarjetaId = document.getElementById('ec-tarjeta')?.value;
-  if (!tarjetaId) {
-    document.getElementById('ec-msg').innerHTML = '<div class="msg-err">Selecciona la tarjeta primero.</div>';
-    return;
-  }
-  if (!_ecArchivo) {
-    document.getElementById('ec-msg').innerHTML = '<div class="msg-err">Selecciona un archivo primero.</div>';
-    return;
-  }
+  if (!tarjetaId || !_ecArchivo) return;
 
-  const btn = document.getElementById('ec-btn');
-  btn.disabled = true;
-  btn.textContent = '⏳ Leyendo archivo...';
-  document.getElementById('ec-msg').innerHTML = '';
+  const tarjeta = S.catalogoTarjetas.find(t => t.id === tarjetaId);
+  const msgDiv = document.getElementById('ec-msg');
+  const guardarBtn = document.getElementById('ec-guardar-btn');
+  const dz = document.getElementById('ec-dropzone');
+
+  msgDiv.innerHTML = '<div style="background:#EEF5FF;border-left:3px solid #185FA5;border-radius:6px;padding:9px 12px;font-size:12px;color:#185FA5;display:flex;align-items:center;gap:8px"><span style="animation:spin .8s linear infinite;display:inline-block">⏳</span> Leyendo PDF con IA — puede tardar unos segundos...</div>';
+  if (dz) dz.style.opacity = '0.5';
+  if (guardarBtn) guardarBtn.disabled = true;
 
   try {
-    const tarjeta = S.catalogoTarjetas.find(t => t.id === tarjetaId);
-    const esPDF = _ecArchivo.name.toLowerCase().endsWith('.pdf');
-    const key = localStorage.getItem(SK + '_claudekey');
+    const base64 = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = e => res(e.target.result.split(',')[1]);
+      r.onerror = rej;
+      r.readAsDataURL(_ecArchivo);
+    });
 
-    let datos;
+    const resp = await fetch(`${SB_URL}/functions/v1/analizar-estado`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SB_KEY,
+        'Authorization': `Bearer ${SB_KEY}`,
+      },
+      body: JSON.stringify({
+        pdf_base64: base64,
+        banco: tarjeta?.banco,
+        cuenta: tarjeta?.cuenta,
+        mes: mesActual(),
+      }),
+    });
 
-    if (key) {
-      // ── CON API DE CLAUDE ────────────────────────────
-      btn.textContent = '⏳ Analizando con Claude...';
-      const instruccion = `Analiza este estado de cuenta bancario de ${tarjeta?.banco} ${tarjeta?.cuenta} para ${mesActual()}.
-Responde SOLO con JSON válido sin texto adicional:
-{"fecha_corte":"YYYY-MM-DD o null","fecha_pago":"YYYY-MM-DD o null","saldo_anterior":null,"total_compras":null,"total_pagos":null,"total_intereses":null,"valor_pagar":null,"pago_minimo":null,"disponible":null,"moneda":"L","movimientos":[{"fecha":"YYYY-MM-DD","descripcion":"texto","monto":0,"tipo":"compra"}]}
-Montos como números sin símbolos. null si no aparece.`;
-
-      let messageContent;
-      if (esPDF) {
-        const base64 = await new Promise((res, rej) => {
-          const r = new FileReader();
-          r.onload = e => res(e.target.result.split(',')[1]);
-          r.onerror = rej;
-          r.readAsDataURL(_ecArchivo);
-        });
-        messageContent = [
-          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
-          { type: 'text', text: instruccion }
-        ];
-      } else {
-        const txt = await ecLeerExcel(_ecArchivo);
-        messageContent = [{ type: 'text', text: instruccion + '\n\n' + txt }];
-      }
-
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'x-api-key': key,
-          'anthropic-version': '2023-06-01',
-          'anthropic-beta': 'pdfs-2024-09-25',
-          'anthropic-dangerous-direct-browser-access': 'true',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, messages: [{ role: 'user', content: messageContent }] })
-      });
-      const d = await resp.json();
-      if (d.error) throw new Error(d.error.message);
-      const match = (d.content?.[0]?.text || '').match(/\{[\s\S]*\}/);
-      if (!match) throw new Error('No se pudo extraer datos del análisis');
-      datos = JSON.parse(match[0]);
-
-    } else {
-      // ── SIN API: PDF.js + REGEX ──────────────────────
-      btn.textContent = '⏳ Leyendo PDF...';
-      let texto = '';
-      if (esPDF) {
-        texto = await ecExtraerTextoPDF(_ecArchivo);
-      } else {
-        texto = await ecLeerExcel(_ecArchivo);
-      }
-      datos = ecParsearTexto(texto);
-      // Mostrar formulario editable para que Jorge corrija lo que faltó
-      ecMostrarFormularioEditable(datos, tarjeta, tarjetaId);
-      btn.disabled = false;
-      btn.textContent = '✦ Leer archivo';
-      return;
-    }
+    const datos = await resp.json();
+    if (datos.error) throw new Error(datos.error);
 
     _ecDatosExtraidos = { ...datos, tarjeta_id: tarjetaId };
-    ecMostrarResultado(_ecDatosExtraidos, tarjeta);
+
+    // Mostrar formulario
+    const res = document.getElementById('ec-resultado');
+    const info = document.getElementById('ec-tarjeta-info');
+    if (info) info.innerHTML = `${tarjeta?.banco || ''} ${tarjeta?.cuenta || ''} <span class="titular-badge tb-${tarjeta?.titular||'jorge'}">${tarjeta?.titular==='isis'?'Isis':'Jorge'}</span> — ${capitalizar(mesActual())}`;
+    if (res) res.classList.remove('hidden');
+
+    // Pre-llenar campos con los datos extraídos
+    const set = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+    set('ec-e-corte', datos.fecha_corte);
+    set('ec-e-pago', datos.fecha_pago);
+    set('ec-e-total', datos.valor_pagar);
+    set('ec-e-minimo', datos.pago_minimo);
+    set('ec-e-anterior', datos.saldo_anterior);
+    set('ec-e-disponible', datos.disponible);
+    set('ec-e-compras', datos.total_compras);
+    set('ec-e-intereses', datos.total_intereses);
+
+    msgDiv.innerHTML = '<div style="background:#EAF3DE;border-left:3px solid #3B6D11;border-radius:6px;padding:9px 12px;font-size:12px;color:#3B6D11;font-weight:600">✓ Datos extraídos — revisa y guarda</div>';
+    if (guardarBtn) guardarBtn.disabled = false;
+    res.scrollIntoView({ behavior: 'smooth', block: 'start' });
 
   } catch (err) {
-    document.getElementById('ec-msg').innerHTML = `<div class="msg-err">Error: ${esc(err.message)}</div>`;
+    msgDiv.innerHTML = `<div class="msg-err">⚠ ${esc(err.message)}</div>`;
+    if (guardarBtn) guardarBtn.disabled = false;
   }
 
-  btn.disabled = false;
-  btn.textContent = '✦ Leer archivo';
+  if (dz) dz.style.opacity = '1';
 }
 
 // ── Extraer texto de PDF con PDF.js (sin API) ──────────────
