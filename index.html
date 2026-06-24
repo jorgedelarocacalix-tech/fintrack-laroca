@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Fintrack · La Roca</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;background:#E8EAF0;color:#202124;min-height:100vh}
@@ -431,7 +432,7 @@ function render() {
 
   // tabs secundarios
   const subItems = S.tabMain === 'tarjetas'
-    ? [['resumen','Resumen'],['jorge','Jorge'],['isis','Isis'],['calendario','📅 Fechas'],['agregar','＋ Registrar']]
+    ? [['resumen','Resumen'],['jorge','Jorge'],['isis','Isis'],['calendario','📅 Fechas'],['estado','📤 Estado'],['agregar','＋ Registrar']]
     : [['resumen','Resumen'],['agregar','＋ Agregar'],['lista','Lista']];
 
   document.getElementById('tabs-sub-wrap').innerHTML =
@@ -447,6 +448,7 @@ function render() {
     else if (S.tabSub === 'jorge') c.innerHTML = renderListaTarjetas('jorge');
     else if (S.tabSub === 'isis')  c.innerHTML = renderListaTarjetas('isis');
     else if (S.tabSub === 'calendario') c.innerHTML = renderCalendario();
+    else if (S.tabSub === 'estado')     c.innerHTML = renderSubirEstado();
     else if (S.tabSub === 'agregar')    c.innerHTML = renderFormTarjeta();
   } else {
     if (S.tabSub === 'resumen')  c.innerHTML = renderResumenProv();
@@ -874,6 +876,356 @@ async function marcarPagadoProv(id, e) {
   if (e) e.stopPropagation();
   await sbPatch('ft_pagos_proveedor', id, { estado: 'pagado' });
   await cargarTodo(); render();
+}
+
+// ═══════════════════════════════════════════════════
+// SUBIR ESTADO DE CUENTA — FLUJO COMPLETO
+// ═══════════════════════════════════════════════════
+function renderSubirEstado() {
+  const opsTarjetas = [
+    '<optgroup label="Jorge">',
+    ...S.catalogoTarjetas.filter(t => t.titular === 'jorge').map(t =>
+      `<option value="${t.id}">${esc(t.banco)} ${esc(t.cuenta)}</option>`),
+    '</optgroup>',
+    '<optgroup label="Isis">',
+    ...S.catalogoTarjetas.filter(t => t.titular === 'isis').map(t =>
+      `<option value="${t.id}">[Isis] ${esc(t.banco)} ${esc(t.cuenta)}</option>`),
+    '</optgroup>',
+  ].join('');
+
+  return `<div class="form-card">
+    <div class="form-title t">📤 Subir Estado de Cuenta</div>
+    <p style="font-size:12px;color:#777;margin-bottom:14px;line-height:1.5">
+      Sube el PDF o Excel del estado de cuenta. Claude extrae las fechas y montos
+      y los registra automáticamente en la proyección del mes.
+    </p>
+    <div id="ec-msg"></div>
+
+    <div class="frow">
+      <label>¿De cuál tarjeta es este estado?</label>
+      <select id="ec-tarjeta">
+        <option value="">— Seleccionar tarjeta —</option>
+        ${opsTarjetas}
+      </select>
+    </div>
+
+    <div class="frow">
+      <label>Archivo (PDF o Excel)</label>
+      <div id="ec-dropzone" onclick="document.getElementById('ec-file').click()"
+        style="border:2px dashed #C5D8F0;border-radius:10px;padding:24px;text-align:center;cursor:pointer;background:#F4F8FF;transition:.2s"
+        ondragover="event.preventDefault();this.style.borderColor='#185FA5'"
+        ondragleave="this.style.borderColor='#C5D8F0'"
+        ondrop="ecDrop(event)">
+        <div style="font-size:28px;margin-bottom:6px">📄</div>
+        <div style="font-size:13px;color:#555;font-weight:600">Toca aquí para seleccionar</div>
+        <div style="font-size:11px;color:#999;margin-top:3px">PDF o Excel (.xlsx, .xls, .csv)</div>
+        <div id="ec-filename" style="font-size:11px;color:#185FA5;margin-top:6px;font-weight:700"></div>
+      </div>
+      <input type="file" id="ec-file" accept=".pdf,.xlsx,.xls,.csv" class="hidden" onchange="ecArchivoSeleccionado(this)">
+    </div>
+
+    <button class="btn-submit btn-t" id="ec-btn" onclick="ecAnalizar()" disabled>
+      ✦ Analizar con IA y registrar
+    </button>
+  </div>
+
+  <div id="ec-resultado" class="hidden" style="margin-top:12px">
+    <div class="form-card">
+      <div class="form-title t">Resultado del análisis</div>
+      <div id="ec-datos"></div>
+      <button class="btn-submit btn-t" id="ec-guardar-btn" onclick="ecGuardar()" style="margin-top:10px">
+        ✓ Guardar en la proyección
+      </button>
+    </div>
+  </div>`;
+}
+
+let _ecArchivo = null;
+let _ecDatosExtraidos = null;
+
+function ecDrop(e) {
+  e.preventDefault();
+  document.getElementById('ec-dropzone').style.borderColor = '#C5D8F0';
+  const f = e.dataTransfer.files[0];
+  if (f) ecSetArchivo(f);
+}
+
+function ecArchivoSeleccionado(input) {
+  if (input.files[0]) ecSetArchivo(input.files[0]);
+}
+
+function ecSetArchivo(file) {
+  _ecArchivo = file;
+  const fn = document.getElementById('ec-filename');
+  if (fn) fn.textContent = '✓ ' + file.name;
+  const btn = document.getElementById('ec-btn');
+  if (btn) btn.disabled = false;
+}
+
+async function ecAnalizar() {
+  const tarjetaId = document.getElementById('ec-tarjeta')?.value;
+  if (!tarjetaId) {
+    document.getElementById('ec-msg').innerHTML = '<div class="msg-err">Selecciona la tarjeta primero.</div>';
+    return;
+  }
+  if (!_ecArchivo) {
+    document.getElementById('ec-msg').innerHTML = '<div class="msg-err">Selecciona un archivo primero.</div>';
+    return;
+  }
+  const key = localStorage.getItem(SK + '_claudekey');
+  if (!key) {
+    document.getElementById('ec-msg').innerHTML = '<div class="msg-err">Configura tu Claude API key en ⚙ Configuración.</div>';
+    return;
+  }
+
+  const btn = document.getElementById('ec-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Analizando...';
+  document.getElementById('ec-msg').innerHTML = '';
+
+  try {
+    const tarjeta = S.catalogoTarjetas.find(t => t.id === tarjetaId);
+    const nombreTarjeta = tarjeta ? `${tarjeta.banco} ${tarjeta.cuenta} (${tarjeta.titular})` : 'tarjeta seleccionada';
+    const esPDF = _ecArchivo.name.toLowerCase().endsWith('.pdf');
+
+    const instruccion = `Analiza este estado de cuenta bancario de ${nombreTarjeta} correspondiente a ${mesActual()}.
+Extrae SOLO estos datos en formato JSON válido, sin texto adicional antes o después:
+{
+  "fecha_corte": "YYYY-MM-DD o null",
+  "fecha_pago": "YYYY-MM-DD o null",
+  "saldo_anterior": número o null,
+  "total_compras": número o null,
+  "total_pagos": número o null,
+  "total_intereses": número o null,
+  "valor_pagar": número o null,
+  "pago_minimo": número o null,
+  "disponible": número o null,
+  "moneda": "L o USD",
+  "movimientos": [
+    {"fecha": "YYYY-MM-DD", "descripcion": "texto", "monto": número, "tipo": "compra|pago|interes|otro"}
+  ]
+}
+Si un campo no aparece, usa null. Montos como números sin símbolos de moneda.`;
+
+    let messageContent;
+    if (esPDF) {
+      const base64 = await new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = e => res(e.target.result.split(',')[1]);
+        r.onerror = rej;
+        r.readAsDataURL(_ecArchivo);
+      });
+      messageContent = [
+        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
+        { type: 'text', text: instruccion }
+      ];
+    } else {
+      const textoExcel = await ecLeerExcel(_ecArchivo);
+      messageContent = [{ type: 'text', text: instruccion + '\n\nCONTENIDO DEL ARCHIVO:\n' + textoExcel }];
+    }
+
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'x-api-key': key,
+        'anthropic-version': '2023-06-01',
+        'anthropic-beta': 'pdfs-2024-09-25',
+        'anthropic-dangerous-direct-browser-access': 'true',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 4096,
+        messages: [{ role: 'user', content: messageContent }]
+      })
+    });
+
+    const d = await resp.json();
+    if (d.error) throw new Error(d.error.message);
+
+    const texto = d.content?.[0]?.text || '';
+    const jsonMatch = texto.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error('No se pudo extraer JSON del análisis');
+
+    _ecDatosExtraidos = { ...JSON.parse(jsonMatch[0]), tarjeta_id: tarjetaId };
+    ecMostrarResultado(_ecDatosExtraidos, tarjeta);
+
+  } catch (err) {
+    document.getElementById('ec-msg').innerHTML = `<div class="msg-err">Error: ${esc(err.message)}</div>`;
+  }
+
+  btn.disabled = false;
+  btn.textContent = '✦ Analizar con IA y registrar';
+}
+
+async function ecLeerPDF(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const base64 = e.target.result.split(',')[1];
+      // Enviar como texto el base64 — Claude puede procesar PDFs en base64
+      resolve('[PDF en base64 — Claude analizará el documento directamente]\nBase64: ' + base64.substring(0, 100) + '...');
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function ecLeerPDFConClaude(file, key) {
+  // Para PDFs usamos el tipo document de la API de Claude
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async e => {
+      const base64 = e.target.result.split(',')[1];
+      try {
+        const resp = await fetch('https://api.anthropic.com/v1/messages', {
+          method: 'POST',
+          headers: {
+            'x-api-key': key,
+            'anthropic-version': '2023-06-01',
+            'anthropic-dangerous-direct-browser-access': 'true',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: 'claude-sonnet-4-6',
+            max_tokens: 4096,
+            messages: [{
+              role: 'user',
+              content: [
+                { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
+                { type: 'text', text: 'Extrae todo el texto de este estado de cuenta bancario, incluyendo fechas, montos y movimientos.' }
+              ]
+            }]
+          })
+        });
+        const d = await resp.json();
+        resolve(d.content?.[0]?.text || '');
+      } catch(err) { reject(err); }
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function ecLeerExcel(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        if (file.name.toLowerCase().endsWith('.csv')) {
+          resolve(new TextDecoder().decode(new Uint8Array(e.target.result)));
+          return;
+        }
+        const wb = XLSX.read(new Uint8Array(e.target.result), { type: 'array', cellDates: true });
+        let texto = '';
+        wb.SheetNames.forEach(name => {
+          texto += `\n=== Hoja: ${name} ===\n`;
+          texto += XLSX.utils.sheet_to_csv(wb.Sheets[name]);
+        });
+        resolve(texto);
+      } catch(err) { reject(err); }
+    };
+    reader.onerror = reject;
+    reader.readAsArrayBuffer(file);
+  });
+}
+
+function ecMostrarResultado(datos, tarjeta) {
+  const res = document.getElementById('ec-resultado');
+  const dat = document.getElementById('ec-datos');
+  res.classList.remove('hidden');
+
+  const fila = (lbl, val, dest) => val != null
+    ? `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #F0F0F0">
+        <span style="font-size:12px;color:#666">${lbl}</span>
+        <span style="font-size:13px;font-weight:700;color:${dest||'#333'}">${val}</span>
+       </div>`
+    : '';
+
+  const movs = (datos.movimientos || []).slice(0, 5);
+  const movHtml = movs.length ? `
+    <div style="margin-top:10px">
+      <div style="font-size:11px;font-weight:700;color:#888;text-transform:uppercase;margin-bottom:6px">
+        Primeros movimientos (${datos.movimientos.length} total)
+      </div>
+      ${movs.map(m => `
+        <div style="display:flex;justify-content:space-between;font-size:11px;padding:4px 0;border-bottom:1px solid #F5F5F5">
+          <span style="color:#555;flex:1;margin-right:8px">${esc(m.descripcion||'')}</span>
+          <span style="font-weight:700;color:${m.tipo==='pago'?'#3B6D11':'#A32D2D'}">${m.tipo==='pago'?'-':'+'} L ${fmt(m.monto||0)}</span>
+        </div>`).join('')}
+    </div>` : '';
+
+  dat.innerHTML = `
+    <div style="background:#EEF5FF;border-radius:8px;padding:10px 12px;margin-bottom:10px">
+      <div style="font-size:11px;font-weight:700;color:#185FA5;margin-bottom:4px">
+        ${tarjeta ? tarjeta.banco + ' ' + tarjeta.cuenta : ''}
+        <span class="titular-badge tb-${tarjeta?.titular||'jorge'}">${tarjeta?.titular==='isis'?'Isis':'Jorge'}</span>
+      </div>
+      <div style="font-size:11px;color:#666">${capitalizar(mesActual())}</div>
+    </div>
+    ${fila('Fecha de corte',   datos.fecha_corte   ? fmtFecha(datos.fecha_corte)  : null)}
+    ${fila('Fecha de pago',    datos.fecha_pago    ? fmtFecha(datos.fecha_pago)   : null, '#A32D2D')}
+    ${fila('Saldo anterior',   datos.saldo_anterior != null ? 'L '+fmt(datos.saldo_anterior) : null)}
+    ${fila('Compras del mes',  datos.total_compras  != null ? 'L '+fmt(datos.total_compras)  : null)}
+    ${fila('Pagos realizados', datos.total_pagos    != null ? 'L '+fmt(datos.total_pagos)    : null, '#3B6D11')}
+    ${fila('Intereses',        datos.total_intereses!= null ? 'L '+fmt(datos.total_intereses): null, '#854F0B')}
+    ${fila('Total a pagar',    datos.valor_pagar    != null ? 'L '+fmt(datos.valor_pagar)    : null, '#A32D2D')}
+    ${fila('Pago mínimo',      datos.pago_minimo    != null ? 'L '+fmt(datos.pago_minimo)    : null)}
+    ${fila('Disponible',       datos.disponible     != null ? 'L '+fmt(datos.disponible)     : null, '#3B6D11')}
+    ${movHtml}`;
+
+  res.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function ecGuardar() {
+  if (!_ecDatosExtraidos) return;
+  const btn = document.getElementById('ec-guardar-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Guardando...';
+
+  const d = _ecDatosExtraidos;
+  const payload = {
+    tarjeta_id:      d.tarjeta_id,
+    mes:             mesActual(),
+    fecha_pago:      d.fecha_pago    || null,
+    fecha_corte:     d.fecha_corte   || null,
+    valor_pagar:     d.valor_pagar   || null,
+    pago_minimo:     d.pago_minimo   || null,
+    disponible:      d.disponible    || null,
+    saldo_anterior:  d.saldo_anterior|| null,
+    total_compras:   d.total_compras || null,
+    total_pagos:     d.total_pagos   || null,
+    total_intereses: d.total_intereses|| null,
+    moneda:          d.moneda === 'USD' ? 'USD' : 'L',
+    estado:          'pendiente',
+  };
+
+  const res = await sbPost('ft_registros_mes', payload);
+  if (res?.error || !res) {
+    document.getElementById('ec-msg').innerHTML = `<div class="msg-err">Error guardando: ${res?.message||'desconocido'}</div>`;
+    btn.disabled = false;
+    btn.textContent = '✓ Guardar en la proyección';
+    return;
+  }
+
+  const registroId = res[0]?.id || res.id;
+
+  // Guardar movimientos si los hay
+  if (registroId && d.movimientos?.length) {
+    const movRows = d.movimientos.map(m => ({
+      registro_id: registroId,
+      fecha:       m.fecha || null,
+      descripcion: m.descripcion || '',
+      monto:       m.monto || 0,
+      tipo:        m.tipo || 'otro',
+    }));
+    await sbPost('ft_movimientos', movRows);
+  }
+
+  await cargarTodo();
+  _ecDatosExtraidos = null;
+  _ecArchivo = null;
+  irTab('tarjetas', 'resumen');
 }
 
 // ═══════════════════════════════════════════════════
