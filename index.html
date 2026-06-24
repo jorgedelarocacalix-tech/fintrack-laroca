@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Fintrack · La Roca</title>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;background:#E8EAF0;color:#202124;min-height:100vh}
@@ -925,7 +926,7 @@ function renderSubirEstado() {
     </div>
 
     <button class="btn-submit btn-t" id="ec-btn" onclick="ecAnalizar()" disabled>
-      ✦ Analizar con IA y registrar
+      ✦ Leer archivo
     </button>
   </div>
 
@@ -972,82 +973,79 @@ async function ecAnalizar() {
     document.getElementById('ec-msg').innerHTML = '<div class="msg-err">Selecciona un archivo primero.</div>';
     return;
   }
-  const key = localStorage.getItem(SK + '_claudekey');
-  if (!key) {
-    document.getElementById('ec-msg').innerHTML = '<div class="msg-err">Configura tu Claude API key en ⚙ Configuración.</div>';
-    return;
-  }
 
   const btn = document.getElementById('ec-btn');
   btn.disabled = true;
-  btn.textContent = '⏳ Analizando...';
+  btn.textContent = '⏳ Leyendo archivo...';
   document.getElementById('ec-msg').innerHTML = '';
 
   try {
     const tarjeta = S.catalogoTarjetas.find(t => t.id === tarjetaId);
-    const nombreTarjeta = tarjeta ? `${tarjeta.banco} ${tarjeta.cuenta} (${tarjeta.titular})` : 'tarjeta seleccionada';
     const esPDF = _ecArchivo.name.toLowerCase().endsWith('.pdf');
+    const key = localStorage.getItem(SK + '_claudekey');
 
-    const instruccion = `Analiza este estado de cuenta bancario de ${nombreTarjeta} correspondiente a ${mesActual()}.
-Extrae SOLO estos datos en formato JSON válido, sin texto adicional antes o después:
-{
-  "fecha_corte": "YYYY-MM-DD o null",
-  "fecha_pago": "YYYY-MM-DD o null",
-  "saldo_anterior": número o null,
-  "total_compras": número o null,
-  "total_pagos": número o null,
-  "total_intereses": número o null,
-  "valor_pagar": número o null,
-  "pago_minimo": número o null,
-  "disponible": número o null,
-  "moneda": "L o USD",
-  "movimientos": [
-    {"fecha": "YYYY-MM-DD", "descripcion": "texto", "monto": número, "tipo": "compra|pago|interes|otro"}
-  ]
-}
-Si un campo no aparece, usa null. Montos como números sin símbolos de moneda.`;
+    let datos;
 
-    let messageContent;
-    if (esPDF) {
-      const base64 = await new Promise((res, rej) => {
-        const r = new FileReader();
-        r.onload = e => res(e.target.result.split(',')[1]);
-        r.onerror = rej;
-        r.readAsDataURL(_ecArchivo);
+    if (key) {
+      // ── CON API DE CLAUDE ────────────────────────────
+      btn.textContent = '⏳ Analizando con Claude...';
+      const instruccion = `Analiza este estado de cuenta bancario de ${tarjeta?.banco} ${tarjeta?.cuenta} para ${mesActual()}.
+Responde SOLO con JSON válido sin texto adicional:
+{"fecha_corte":"YYYY-MM-DD o null","fecha_pago":"YYYY-MM-DD o null","saldo_anterior":null,"total_compras":null,"total_pagos":null,"total_intereses":null,"valor_pagar":null,"pago_minimo":null,"disponible":null,"moneda":"L","movimientos":[{"fecha":"YYYY-MM-DD","descripcion":"texto","monto":0,"tipo":"compra"}]}
+Montos como números sin símbolos. null si no aparece.`;
+
+      let messageContent;
+      if (esPDF) {
+        const base64 = await new Promise((res, rej) => {
+          const r = new FileReader();
+          r.onload = e => res(e.target.result.split(',')[1]);
+          r.onerror = rej;
+          r.readAsDataURL(_ecArchivo);
+        });
+        messageContent = [
+          { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
+          { type: 'text', text: instruccion }
+        ];
+      } else {
+        const txt = await ecLeerExcel(_ecArchivo);
+        messageContent = [{ type: 'text', text: instruccion + '\n\n' + txt }];
+      }
+
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': key,
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'pdfs-2024-09-25',
+          'anthropic-dangerous-direct-browser-access': 'true',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 4096, messages: [{ role: 'user', content: messageContent }] })
       });
-      messageContent = [
-        { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } },
-        { type: 'text', text: instruccion }
-      ];
+      const d = await resp.json();
+      if (d.error) throw new Error(d.error.message);
+      const match = (d.content?.[0]?.text || '').match(/\{[\s\S]*\}/);
+      if (!match) throw new Error('No se pudo extraer datos del análisis');
+      datos = JSON.parse(match[0]);
+
     } else {
-      const textoExcel = await ecLeerExcel(_ecArchivo);
-      messageContent = [{ type: 'text', text: instruccion + '\n\nCONTENIDO DEL ARCHIVO:\n' + textoExcel }];
+      // ── SIN API: PDF.js + REGEX ──────────────────────
+      btn.textContent = '⏳ Leyendo PDF...';
+      let texto = '';
+      if (esPDF) {
+        texto = await ecExtraerTextoPDF(_ecArchivo);
+      } else {
+        texto = await ecLeerExcel(_ecArchivo);
+      }
+      datos = ecParsearTexto(texto);
+      // Mostrar formulario editable para que Jorge corrija lo que faltó
+      ecMostrarFormularioEditable(datos, tarjeta, tarjetaId);
+      btn.disabled = false;
+      btn.textContent = '✦ Leer archivo';
+      return;
     }
 
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'x-api-key': key,
-        'anthropic-version': '2023-06-01',
-        'anthropic-beta': 'pdfs-2024-09-25',
-        'anthropic-dangerous-direct-browser-access': 'true',
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 4096,
-        messages: [{ role: 'user', content: messageContent }]
-      })
-    });
-
-    const d = await resp.json();
-    if (d.error) throw new Error(d.error.message);
-
-    const texto = d.content?.[0]?.text || '';
-    const jsonMatch = texto.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error('No se pudo extraer JSON del análisis');
-
-    _ecDatosExtraidos = { ...JSON.parse(jsonMatch[0]), tarjeta_id: tarjetaId };
+    _ecDatosExtraidos = { ...datos, tarjeta_id: tarjetaId };
     ecMostrarResultado(_ecDatosExtraidos, tarjeta);
 
   } catch (err) {
@@ -1055,7 +1053,210 @@ Si un campo no aparece, usa null. Montos como números sin símbolos de moneda.`
   }
 
   btn.disabled = false;
-  btn.textContent = '✦ Analizar con IA y registrar';
+  btn.textContent = '✦ Leer archivo';
+}
+
+// ── Extraer texto de PDF con PDF.js (sin API) ──────────────
+async function ecExtraerTextoPDF(file) {
+  if (typeof pdfjsLib === 'undefined') throw new Error('PDF.js no cargó correctamente.');
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js';
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let texto = '';
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    texto += content.items.map(item => item.str).join(' ') + '\n';
+  }
+  return texto;
+}
+
+// ── Parser con regex para bancos hondureños ────────────────
+function ecParsearTexto(texto) {
+  const t = texto.replace(/\s+/g, ' ');
+
+  // Fechas: busca "fecha de pago", "vencimiento", "fecha limite", "fecha corte"
+  function buscarFecha(patrones) {
+    for (const p of patrones) {
+      const m = t.match(p);
+      if (m && m[1]) return ecNormalizarFecha(m[1].trim());
+    }
+    return null;
+  }
+
+  // Montos: busca número tras etiqueta, con L, comas, decimales
+  function buscarMonto(patrones) {
+    for (const p of patrones) {
+      const m = t.match(p);
+      if (m && m[1]) {
+        const n = parseFloat(m[1].replace(/,/g, ''));
+        if (!isNaN(n)) return n;
+      }
+    }
+    return null;
+  }
+
+  const fecha_pago = buscarFecha([
+    /fecha\s*(?:l[íi]mite|de\s*pago|pago|vencimiento)[:\s]+(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i,
+    /vencimiento[:\s]+(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i,
+    /pagar\s*antes\s*del[:\s]+(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i,
+  ]);
+
+  const fecha_corte = buscarFecha([
+    /fecha\s*(?:de\s*)?corte[:\s]+(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i,
+    /corte[:\s]+(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i,
+    /per[íi]odo.*?al\s+(\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4})/i,
+  ]);
+
+  const valor_pagar = buscarMonto([
+    /(?:saldo\s*total|total\s*a\s*pagar|monto\s*total|pago\s*total)[:\s]+L?\.?\s*([\d,]+\.?\d{0,2})/i,
+    /total[:\s]+L?\.?\s*([\d,]+\.\d{2})/i,
+  ]);
+
+  const pago_minimo = buscarMonto([
+    /pago\s*m[íi]nimo[:\s]+L?\.?\s*([\d,]+\.?\d{0,2})/i,
+    /m[íi]nimo[:\s]+L?\.?\s*([\d,]+\.\d{2})/i,
+  ]);
+
+  const saldo_anterior = buscarMonto([
+    /saldo\s*anterior[:\s]+L?\.?\s*([\d,]+\.?\d{0,2})/i,
+    /saldo\s*al\s*inicio[:\s]+L?\.?\s*([\d,]+\.\d{2})/i,
+  ]);
+
+  const total_compras = buscarMonto([
+    /(?:total\s*)?compras[:\s]+L?\.?\s*([\d,]+\.?\d{0,2})/i,
+    /cargo[s]?\s*del\s*mes[:\s]+L?\.?\s*([\d,]+\.\d{2})/i,
+  ]);
+
+  const total_pagos = buscarMonto([
+    /(?:total\s*)?pagos[:\s]+L?\.?\s*([\d,]+\.?\d{0,2})/i,
+    /abonos[:\s]+L?\.?\s*([\d,]+\.\d{2})/i,
+  ]);
+
+  const total_intereses = buscarMonto([
+    /intereses?[:\s]+L?\.?\s*([\d,]+\.?\d{0,2})/i,
+    /cargo\s*(?:por\s*)?inter[eé]s[:\s]+L?\.?\s*([\d,]+\.\d{2})/i,
+  ]);
+
+  const disponible = buscarMonto([
+    /(?:cr[eé]dito\s*)?disponible[:\s]+L?\.?\s*([\d,]+\.?\d{0,2})/i,
+    /l[íi]mite\s*disponible[:\s]+L?\.?\s*([\d,]+\.\d{2})/i,
+  ]);
+
+  const esUSD = /USD|d[oó]lar|\$/i.test(t.substring(0, 200));
+
+  return { fecha_corte, fecha_pago, saldo_anterior, total_compras, total_pagos,
+    total_intereses, valor_pagar, pago_minimo, disponible,
+    moneda: esUSD ? 'USD' : 'L', movimientos: [] };
+}
+
+function ecNormalizarFecha(str) {
+  if (!str) return null;
+  const p = str.split(/[\/-]/);
+  if (p.length !== 3) return null;
+  let [a, b, c] = p.map(Number);
+  let dia, mes, anio;
+  if (c > 31) { anio = c; if (a > 12) { dia = a; mes = b; } else { mes = a; dia = b; } }
+  else if (a > 31) { anio = a; mes = b; dia = c; }
+  else { dia = a; mes = b; anio = c < 100 ? 2000 + c : c; }
+  if (!dia || !mes || !anio || mes > 12 || dia > 31) return null;
+  return `${anio}-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`;
+}
+
+// ── Formulario editable cuando no hay API ─────────────────
+function ecMostrarFormularioEditable(datos, tarjeta, tarjetaId) {
+  const res = document.getElementById('ec-resultado');
+  const dat = document.getElementById('ec-datos');
+  res.classList.remove('hidden');
+
+  const encontrado = Object.values(datos).some(v => v !== null && v !== 'L' && !Array.isArray(v));
+
+  dat.innerHTML = `
+    <div style="background:#FFF8E6;border-left:3px solid #854F0B;border-radius:6px;padding:9px 12px;font-size:12px;color:#854F0B;margin-bottom:12px">
+      ${encontrado
+        ? '✓ Se detectaron algunos datos automáticamente. Revisa y corrige lo que falte.'
+        : '⚠ No se detectaron datos automáticamente. Ingresa los datos manualmente.'}
+    </div>
+
+    <div style="background:#EEF5FF;border-radius:8px;padding:10px 12px;margin-bottom:12px">
+      <div style="font-size:12px;font-weight:700;color:#185FA5">
+        ${tarjeta ? tarjeta.banco + ' ' + tarjeta.cuenta : ''}
+        <span class="titular-badge tb-${tarjeta?.titular||'jorge'}">${tarjeta?.titular==='isis'?'Isis':'Jorge'}</span>
+      </div>
+      <div style="font-size:11px;color:#666">${capitalizar(mesActual())}</div>
+    </div>
+
+    <div class="frow-2">
+      <div class="frow"><label>Fecha de corte</label>
+        <input type="date" id="ec-e-corte" value="${datos.fecha_corte||''}"></div>
+      <div class="frow"><label>Fecha de pago</label>
+        <input type="date" id="ec-e-pago" value="${datos.fecha_pago||''}"></div>
+    </div>
+    <div class="frow-2">
+      <div class="frow"><label>Total a pagar (L)</label>
+        <input type="number" id="ec-e-total" placeholder="0.00" value="${datos.valor_pagar||''}"></div>
+      <div class="frow"><label>Pago mínimo (L)</label>
+        <input type="number" id="ec-e-minimo" placeholder="0.00" value="${datos.pago_minimo||''}"></div>
+    </div>
+    <div class="frow-2">
+      <div class="frow"><label>Saldo anterior (L)</label>
+        <input type="number" id="ec-e-anterior" placeholder="0.00" value="${datos.saldo_anterior||''}"></div>
+      <div class="frow"><label>Disponible (L)</label>
+        <input type="number" id="ec-e-disponible" placeholder="0.00" value="${datos.disponible||''}"></div>
+    </div>
+    <div class="frow-2">
+      <div class="frow"><label>Compras del mes (L)</label>
+        <input type="number" id="ec-e-compras" placeholder="0.00" value="${datos.total_compras||''}"></div>
+      <div class="frow"><label>Intereses (L)</label>
+        <input type="number" id="ec-e-intereses" placeholder="0.00" value="${datos.total_intereses||''}"></div>
+    </div>`;
+
+  // Reemplazar botón de guardar para leer de los inputs editables
+  _ecDatosExtraidos = { ...datos, tarjeta_id: tarjetaId };
+  const guardarBtn = document.getElementById('ec-guardar-btn');
+  if (guardarBtn) {
+    guardarBtn.onclick = ecGuardarEditable;
+    guardarBtn.textContent = '✓ Guardar en la proyección';
+    guardarBtn.disabled = false;
+  }
+
+  res.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+async function ecGuardarEditable() {
+  const btn = document.getElementById('ec-guardar-btn');
+  btn.disabled = true; btn.textContent = '⏳ Guardando...';
+
+  const tarjetaId = _ecDatosExtraidos?.tarjeta_id;
+  const g = id => { const el = document.getElementById(id); return el?.value ? parseFloat(el.value) : null; };
+  const gd = id => { const el = document.getElementById(id); return el?.value || null; };
+
+  const payload = {
+    tarjeta_id:      tarjetaId,
+    mes:             mesActual(),
+    fecha_pago:      gd('ec-e-pago'),
+    fecha_corte:     gd('ec-e-corte'),
+    valor_pagar:     g('ec-e-total'),
+    pago_minimo:     g('ec-e-minimo'),
+    disponible:      g('ec-e-disponible'),
+    saldo_anterior:  g('ec-e-anterior'),
+    total_compras:   g('ec-e-compras'),
+    total_intereses: g('ec-e-intereses'),
+    moneda:          'L',
+    estado:          'pendiente',
+  };
+
+  const res = await sbPost('ft_registros_mes', payload);
+  if (res?.error) {
+    document.getElementById('ec-msg').innerHTML = `<div class="msg-err">Error: ${res.message}</div>`;
+    btn.disabled = false; btn.textContent = '✓ Guardar en la proyección';
+    return;
+  }
+
+  await cargarTodo();
+  _ecDatosExtraidos = null; _ecArchivo = null;
+  irTab('tarjetas', 'resumen');
 }
 
 async function ecLeerPDF(file) {
