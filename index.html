@@ -468,10 +468,12 @@ function renderResumenTarjetas() {
   const urg   = todos.filter(r => ['mora','urgente'].includes(urgencia(r.fecha_pago, r.estado)));
   const prox  = todos.filter(r => urgencia(r.fecha_pago, r.estado) === 'proximo');
   const pag   = todos.filter(r => r.estado === 'pagado');
+  const totalPend = todos.filter(r => r.estado !== 'pagado').reduce((s, r) => s + (r.valor_pagar || 0), 0);
+  const totalPag  = pag.reduce((s, r) => s + (r.valor_pagar || 0), 0);
 
   if (!todos.length) return emptyMes();
 
-  return chips(urg.length, prox.length, pag.length) +
+  return chips(urg.length, prox.length, pag.length, totalPend, totalPag) +
     todos.map(r => cardTarjeta(r)).join('');
 }
 
@@ -492,7 +494,12 @@ function cardTarjeta(r, forzarTitular) {
   const nombre = (t.banco || '?') + ' ' + (t.cuenta || '');
   const inicial = (t.banco || '?')[0].toUpperCase();
   const monto = r.valor_pagar != null ? 'L ' + fmt(r.valor_pagar) : '—';
-  const sub = r.fecha_pago ? 'Pago: ' + fmtFecha(r.fecha_pago) : 'Sin fecha de pago';
+  const sub = r.fecha_pago
+    ? `Pago: ${fmtFecha(r.fecha_pago)}${r.fecha_corte ? ' · Corte: ' + fmtFecha(r.fecha_corte) : ''}`
+    : 'Sin fecha de pago';
+  const extra = (r.disponible != null || (r.pago_minimo != null && r.estado !== 'pagado'))
+    ? `<div class="psub">${r.disponible != null ? 'Disponible: L ' + fmt(r.disponible) : ''}${r.disponible != null && r.pago_minimo != null && r.estado !== 'pagado' ? ' · ' : ''}${r.pago_minimo != null && r.estado !== 'pagado' ? 'Mín: L ' + fmt(r.pago_minimo) : ''}</div>`
+    : '';
   const usdWarn = r.moneda === 'USD' ? '<div class="pusd">⚠ monto en USD — revisar</div>' : '';
   const nota = r.nota ? `<div class="pnota">${esc(r.nota)}</div>` : '';
   const botonPagado = r.estado !== 'pagado'
@@ -507,7 +514,7 @@ function cardTarjeta(r, forzarTitular) {
     <div class="picon">${inicial}</div>
     <div class="pinfo">
       <div class="pnombre">${esc(nombre)} <span class="titular-badge tb-${titular}">${titular === 'isis' ? 'Isis' : 'Jorge'}</span></div>
-      <div class="psub">${sub}</div>${nota}${usdWarn}${acciones}
+      <div class="psub">${sub}</div>${extra}${nota}${usdWarn}${acciones}
     </div>
     <div class="pder">
       <div class="pmonto">${monto}</div>
@@ -580,10 +587,12 @@ function renderResumenProv() {
   const urg   = todos.filter(p => ['mora','urgente'].includes(urgencia(p.fecha_vence, p.estado)));
   const prox  = todos.filter(p => urgencia(p.fecha_vence, p.estado) === 'proximo');
   const pag   = todos.filter(p => p.estado === 'pagado');
+  const totalPend = todos.filter(p => p.estado !== 'pagado').reduce((s, p) => s + (p.monto || 0), 0);
+  const totalPag  = pag.reduce((s, p) => s + (p.monto || 0), 0);
 
   if (!todos.length) return `<div class="empty">No hay pagos a proveedores pendientes.<br><br><button class="btn-submit btn-p" style="width:auto;padding:8px 18px" onclick="irTabSub('agregar')">＋ Agregar</button></div>`;
 
-  return chips(urg.length, prox.length, pag.length, true) +
+  return chips(urg.length, prox.length, pag.length, totalPend, totalPag, true) +
     todos.map(p => cardProv(p)).join('');
 }
 
@@ -1519,9 +1528,27 @@ function cerrarCfg(e) {
 // ═══════════════════════════════════════════════════
 // HELPERS UI
 // ═══════════════════════════════════════════════════
-function chips(u, p, pg, prov = false) {
-  return `<div class="chips">
-    <div class="chip urg"><div class="n">${u}</div><div class="l">Urgentes</div></div>
+function fmtChip(v) {
+  if (v == null) return '—';
+  if (v >= 1000000) return 'L ' + (v / 1000000).toFixed(2) + 'M';
+  if (v >= 1000)    return 'L ' + (v / 1000).toFixed(0) + 'K';
+  return 'L ' + fmt(v);
+}
+
+function chips(u, p, pg, totalPend = null, totalPag = null, prov = false) {
+  const moneyRow = totalPend != null ? `
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:6px">
+    <div class="chip" style="background:#FCEBEB;border-left:3px solid #A32D2D">
+      <div class="n" style="font-size:17px;color:#A32D2D">${fmtChip(totalPend)}</div>
+      <div class="l">Total por pagar</div>
+    </div>
+    <div class="chip" style="background:#EAF3DE;border-left:3px solid #3B6D11">
+      <div class="n" style="font-size:17px;color:#3B6D11">${fmtChip(totalPag)}</div>
+      <div class="l">Total pagado</div>
+    </div>
+  </div>` : '';
+  return moneyRow + `<div class="chips">
+    <div class="chip urg"><div class="n">${u}</div><div class="l">Mora/Urgente</div></div>
     <div class="chip prox"><div class="n">${p}</div><div class="l">Próximos</div></div>
     <div class="chip pag"><div class="n">${pg}</div><div class="l">Pagados</div></div>
   </div>`;
