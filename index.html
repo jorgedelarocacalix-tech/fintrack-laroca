@@ -162,6 +162,41 @@ body{font-family:'Segoe UI',system-ui,sans-serif;font-size:14px;background:#E8EA
 .pdf-uploading{font-size:10px;color:#854F0B;margin-top:4px}
 
 .hidden{display:none!important}
+
+/* ── RESPONSIVE: MOBILE cards / DESKTOP tabla ────── */
+.vista-cards{display:block}
+.vista-tabla{display:none}
+
+@media(min-width:768px){
+  body{background:#D8DCE6}
+  .app{max-width:100%;box-shadow:none;background:#ECEEF2}
+  #contenido{padding:18px 28px}
+  .header{padding:12px 28px 10px}
+  .vista-cards{display:none}
+  .vista-tabla{display:block;overflow-x:auto;margin-top:4px}
+
+  /* TABLA */
+  .ft-table{width:100%;border-collapse:collapse;background:white;border-radius:12px;overflow:hidden;box-shadow:0 1px 6px rgba(0,0,0,.1)}
+  .ft-table th{background:#185FA5;color:white;padding:10px 14px;text-align:left;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;white-space:nowrap}
+  .ft-table td{padding:9px 14px;border-bottom:1px solid #F0F0F0;font-size:13px;vertical-align:middle}
+  .ft-table tr:last-child td{border-bottom:none}
+  .ft-table tbody tr:hover td{background:#F0F6FF!important}
+  .ft-table tr.mora td   {background:#FFF0F0}
+  .ft-table tr.urgente td{background:#FCEBEB}
+  .ft-table tr.proximo td{background:#FAEEDA}
+  .ft-table tr.pagado td {background:#F0FBF0;opacity:.85}
+  .ft-table tr.ok td     {background:#F9FFF6}
+  .ft-td-monto{font-weight:700;white-space:nowrap}
+  .ft-td-nota{color:#999;font-size:11px;max-width:170px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ft-td-acc{white-space:nowrap;display:flex;gap:4px;align-items:center}
+
+  /* Chips en desktop: 2 grandes + 3 pequeños se ven bien */
+  .chips{grid-template-columns:repeat(3,1fr)}
+
+  /* Panel IA centrado en desktop */
+  .ia-modal{align-items:center}
+  .ia-panel{max-width:680px;border-radius:16px;margin:auto}
+}
 </style>
 </head>
 <body>
@@ -474,7 +509,8 @@ function renderResumenTarjetas() {
   if (!todos.length) return emptyMes();
 
   return chips(urg.length, prox.length, pag.length, totalPend, totalPag) +
-    todos.map(r => cardTarjeta(r)).join('');
+    `<div class="vista-cards">${todos.map(r => cardTarjeta(r)).join('')}</div>` +
+    `<div class="vista-tabla">${renderTablaRegistros(todos)}</div>`;
 }
 
 function renderListaTarjetas(titular) {
@@ -483,8 +519,47 @@ function renderListaTarjetas(titular) {
     'fecha_pago', 'estado'
   );
   if (!lista.length) return `<div class="empty">No hay registros de ${titular === 'jorge' ? 'Jorge' : 'Isis'} este mes.<br><br><button class="btn-submit btn-t" style="width:auto;padding:8px 18px" onclick="irTabSub('agregar')">＋ Registrar pago</button></div>`;
-  return `<div class="stitle ${titular === 'isis' ? 'isis' : ''}">Tarjetas de ${titular === 'jorge' ? 'Jorge' : 'Isis Fonseca'}</div>` +
-    lista.map(r => cardTarjeta(r, titular)).join('');
+  const titulo = `<div class="stitle ${titular === 'isis' ? 'isis' : ''}">Tarjetas de ${titular === 'jorge' ? 'Jorge' : 'Isis Fonseca'}</div>`;
+  return titulo +
+    `<div class="vista-cards">${lista.map(r => cardTarjeta(r, titular)).join('')}</div>` +
+    `<div class="vista-tabla">${renderTablaRegistros(lista)}</div>`;
+}
+
+function renderTablaRegistros(registros) {
+  if (!registros.length) return '';
+  const filas = registros.map(r => {
+    const t   = r.ft_tarjetas || {};
+    const urg = urgencia(r.fecha_pago, r.estado);
+    const titular = t.titular || 'jorge';
+    const accPagado = r.estado !== 'pagado'
+      ? `<button class="btn-mini" onclick="marcarPagadoTarjeta('${r.id}',event)">✓ Pagado</button>`
+      : '';
+    const accPdf = r.pdf_url
+      ? `<a class="pdf-link" href="${r.pdf_url}" target="_blank" onclick="event.stopPropagation()">📄 Ver</a>`
+      : `<button class="btn-mini pdf" onclick="pedirPdf('${r.id}',event)">📄 Estado</button>`;
+    return `<tr class="${urg}">
+      <td>${badge(urg, r.fecha_pago)}</td>
+      <td style="font-weight:700">${esc(t.banco || '?')}</td>
+      <td>${esc(t.cuenta || '—')}</td>
+      <td><span class="titular-badge tb-${titular}">${titular === 'isis' ? 'Isis' : 'Jorge'}</span></td>
+      <td>${r.fecha_corte ? fmtFecha(r.fecha_corte) : '—'}</td>
+      <td style="font-weight:600">${r.fecha_pago ? fmtFecha(r.fecha_pago) : '—'}</td>
+      <td class="ft-td-monto">${r.valor_pagar != null ? 'L ' + fmt(r.valor_pagar) : '—'}</td>
+      <td>${r.pago_minimo != null ? 'L ' + fmt(r.pago_minimo) : '—'}</td>
+      <td>${r.disponible != null ? 'L ' + fmt(r.disponible) : '—'}</td>
+      <td class="ft-td-nota" title="${esc(r.nota || '')}">${esc(r.nota || '')}</td>
+      <td><div class="ft-td-acc">${accPagado}${accPdf}</div></td>
+    </tr>`;
+  }).join('');
+
+  return `<table class="ft-table">
+    <thead><tr>
+      <th>Estado</th><th>Banco</th><th>Cuenta</th><th>Titular</th>
+      <th>Corte</th><th>Fecha Pago</th><th>Total</th><th>Mínimo</th>
+      <th>Disponible</th><th>Nota</th><th>Acciones</th>
+    </tr></thead>
+    <tbody>${filas}</tbody>
+  </table>`;
 }
 
 function cardTarjeta(r, forzarTitular) {
@@ -592,8 +667,33 @@ function renderResumenProv() {
 
   if (!todos.length) return `<div class="empty">No hay pagos a proveedores pendientes.<br><br><button class="btn-submit btn-p" style="width:auto;padding:8px 18px" onclick="irTabSub('agregar')">＋ Agregar</button></div>`;
 
+  const filasProv = todos.map(p => {
+    const cat = p.ft_proveedores_catalogo || {};
+    const u = urgencia(p.fecha_vence, p.estado);
+    const acc = p.estado !== 'pagado'
+      ? `<button class="btn-mini" onclick="marcarPagadoProv('${p.id}',event)">✓ Pagado</button>` : '';
+    return `<tr class="${u}">
+      <td>${badge(u, p.fecha_vence)}</td>
+      <td style="font-weight:700">${esc(cat.nombre || '?')}</td>
+      <td>${esc(cat.categoria || '—')}</td>
+      <td>${p.fecha_vence ? fmtFecha(p.fecha_vence) : '—'}</td>
+      <td class="ft-td-monto">${p.monto != null ? 'L ' + fmt(p.monto) : '—'}</td>
+      <td class="ft-td-nota" title="${esc(p.nota||'')}">${esc(p.nota || '')}</td>
+      <td>${acc}</td>
+    </tr>`;
+  }).join('');
+
+  const tablaProv = `<table class="ft-table">
+    <thead><tr>
+      <th>Estado</th><th>Proveedor</th><th>Categoría</th>
+      <th>Fecha Pago</th><th>Monto</th><th>Nota</th><th>Acciones</th>
+    </tr></thead>
+    <tbody>${filasProv}</tbody>
+  </table>`;
+
   return chips(urg.length, prox.length, pag.length, totalPend, totalPag, true) +
-    todos.map(p => cardProv(p)).join('');
+    `<div class="vista-cards">${todos.map(p => cardProv(p)).join('')}</div>` +
+    `<div class="vista-tabla">${tablaProv}</div>`;
 }
 
 function cardProv(p) {
