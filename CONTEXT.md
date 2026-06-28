@@ -154,25 +154,18 @@ Análisis conversacional con Claude (requiere API key en Config si se quiere usa
 
 ---
 
-## Responsive UI — EN PROCESO (pendiente completar)
+## Responsive UI — COMPLETO (28/jun/2026)
 
-**Estado actual (25/jun/2026):** Se empezó a implementar pero quedó incompleto.
+**Breakpoint:** 768px  
+- **< 768px (móvil):** vista cards como antes  
+- **≥ 768px (PC):** tabla full-width con todas las columnas
 
-**Lo que se hizo:**
-- CSS agregado para breakpoint 768px
-- Clases `.vista-cards` / `.vista-tabla` definidas en el CSS
-- `fmtChip()` y `chips()` actualizados con montos
+**Tabla tarjetas:** Estado · Banco · Cuenta · Titular · Corte · Fecha Pago · Total · Mínimo · Disponible · Nota · Acciones  
+**Tabla proveedores:** Estado · Proveedor · Categoría · Fecha Pago · Monto · Nota · Acciones
 
-**Lo que FALTA implementar:**
-- Función `renderTablaRegistros(registros)` — tabla HTML para desktop
-- Envolver los cards en `<div class="vista-cards">` en `renderResumenTarjetas()`, `renderListaTarjetas()`
-- Agregar `<div class="vista-tabla">` con la tabla en esas mismas funciones
-
-**Diseño de la tabla desktop:**
-```
-| Estado | Banco | Cuenta | Titular | Corte | Fecha Pago | Total L | Mínimo L | Disponible L | Nota | Acciones |
-```
-Filas coloreadas según urgencia (mismos colores que las cards).
+Clases usadas: `.vista-cards` (oculto en desktop) / `.vista-tabla` (oculto en móvil)  
+Función: `renderTablaRegistros(registros)` — genera la tabla de tarjetas  
+Colores de fila: mismos que las cards (mora=rojo oscuro, urgente=rojo, proximo=naranja, pagado=verde claro)
 
 ---
 
